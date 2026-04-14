@@ -10,7 +10,7 @@ from typing import Optional, Tuple
 from google import genai
 from PIL import Image
 
-_MODEL = "models/gemini-2.0-flash-lite"
+_MODEL = "gemini-2.0-flash-lite"
 _client: Optional[genai.Client] = None
 
 def _get_client() -> genai.Client:
@@ -156,34 +156,41 @@ def analyze_with_gemini(content: str, app_name: str) -> dict:
 
 def analyze_image_with_gemini(image_path: str, app_name: str) -> dict:
     client = _get_client()
-    img = Image.open(image_path)
-    prompt = ANALYSIS_PROMPT.format(content="[IMAGE ATTACHED]", app_name=app_name) + "\nIMPORTANT: Also extract every word of text found in this image and include it in a field 'extracted_text_raw' in your JSON response."
-    response = client.models.generate_content(model=_MODEL, contents=[prompt, img])
-    raw = response.text.strip()
-    raw = re.sub(r"^```(?:json)?\s*", "", raw)
-    raw = re.sub(r"\s*```$", "", raw)
-
     try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Gemini image analysis returned invalid JSON: {e}")
+        img = Image.open(image_path)
+        prompt = ANALYSIS_PROMPT.format(content="[IMAGE ATTACHED]", app_name=app_name) + "\nIMPORTANT: Also extract every word of text found in this image and include it in a field 'extracted_text_raw' in your JSON response."
+        
+        try:
+            response = client.models.generate_content(model=_MODEL, contents=[prompt, img])
+            raw = response.text.strip()
+            raw = re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw)
+            data = json.loads(raw)
+        except Exception as e:
+            # If vision fails due to quota, we can't do anything else since we have no text.
+            # We raise a specific error that main.py will catch.
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                raise ValueError("GEMINI_QUOTA_EXHAUSTED")
+            raise e
 
-    return {
-        "source": "ai_image",
-        "word_count": len(data.get("extracted_text_raw", "").split()),
-        "sentences_analyzed": data.get("extracted_text_raw", "").count("."),
-        "ocr_text": data.get("extracted_text_raw", ""),
-        "permissions_found": _normalize_permissions(data.get("permissions_detected", [])),
-        "risky_keywords": _normalize_keywords(data.get("risky_keywords_detected", [])),
-        "sharing_patterns": data.get("data_sharing_patterns_detected", []),
-        "ai_risk_level": data.get("risk_level", "Unknown"),
-        "ai_risk_score": data.get("risk_score", 0),
-        "ai_summary": data.get("summary", ""),
-        "ai_key_issues": data.get("key_issues", []),
-        "ai_recommendations": data.get("recommendations", []),
-        "ai_explanation": data.get("ai_explanation", ""),
-        "detected_type": "Permissions Description" if data.get("risk_score", 0) > 0 else "Terms & Conditions"
-    }
+        return {
+            "source": "ai_image",
+            "word_count": len(data.get("extracted_text_raw", "").split()),
+            "sentences_analyzed": data.get("extracted_text_raw", "").count("."),
+            "ocr_text": data.get("extracted_text_raw", ""),
+            "permissions_found": _normalize_permissions(data.get("permissions_detected", [])),
+            "risky_keywords": _normalize_keywords(data.get("risky_keywords_detected", [])),
+            "sharing_patterns": data.get("data_sharing_patterns_detected", []),
+            "ai_risk_level": data.get("risk_level", "Unknown"),
+            "ai_risk_score": data.get("risk_score", 0),
+            "ai_summary": data.get("summary", ""),
+            "ai_key_issues": data.get("key_issues", []),
+            "ai_recommendations": data.get("recommendations", []),
+            "ai_explanation": data.get("ai_explanation", ""),
+            "detected_type": "Permissions Description" if data.get("risk_score", 0) > 0 else "Terms & Conditions"
+        }
+    except Exception as e:
+        raise e
 
 def _normalize_permissions(raw: list) -> list:
     normalized = []

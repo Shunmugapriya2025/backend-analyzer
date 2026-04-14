@@ -87,6 +87,12 @@ async def analyze(
             app_status = "VALID_APP" # Vision is more trusted for app identity
             detected_type = analysis.get("detected_type", "Permissions/Terms")
         except Exception as e:
+            if "GEMINI_QUOTA_EXHAUSTED" in str(e):
+                raise HTTPException(
+                    status_code=429, 
+                    detail="AI Quota Busy: Your Gemini API free limit has been reached. Please wait 1 minute, or copy/paste the text instead of using an image."
+                )
+            print(f"DEBUG: Processing Error: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Image AI Analysis failed: {str(e)}")
         finally:
             os.unlink(tmp_path)
@@ -137,14 +143,10 @@ async def analyze(
             analysis = analyze_with_keywords(content)
             ai_mode = "keyword_fallback"
 
-    # ── Step 4: Build report ───────────────────────────────────────
     report = generate_report_ai(analysis, input_type.value)
     report["analyzer"] = "Gemini AI Vision" if ai_mode == "gemini_vision" else ("Gemini AI" if ai_mode == "gemini" else "Keyword Analysis")
     report["detected_content_type"] = detected_type
     report["app_status_flag"] = app_status 
-
-    if input_type == InputType.IMAGE and ocr_preview:
-        report["ocr_extracted_text_preview"] = ocr_preview
 
     if app_name and app_name.strip():
         report["app_name"] = app_name.strip()

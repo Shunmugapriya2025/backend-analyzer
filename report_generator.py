@@ -174,36 +174,66 @@ def _build_recommendations(risk: RiskResult, analysis: dict) -> list[str]:
 def generate_report_ai(analysis: dict, input_type: str) -> dict:
     """
     Build the final report from AI analyzer output (Gemini).
+    Recalculates score and level programmatically for consistency.
     """
-    risk_level = analysis.get("ai_risk_level", "Unknown")
-    risk_score = analysis.get("ai_risk_score", 0)
-    icon = RISK_ICONS.get(risk_level, "❓")
-    total_pct = _get_percentage(risk_score)
+    # 1. Gather Items
+    permissions = analysis.get("permissions_found", [])
+    keywords = analysis.get("risky_keywords", [])
+    patterns = analysis.get("sharing_patterns", [])
 
-    # Synthesize breakdown data for AI (which doesn't return raw pts per item)
-    # We assign points based on our internal rules to match the score
-    synth_data = {"permissions": [], "keywords": [], "patterns": []}
-    
+    # 2. Programmatic Scoring (Matches instructions given to AI)
     # Severity scores: high=3, medium=2, low=1
-    for p in analysis.get("permissions_found", []):
-        pts = 3 if p.get("severity", "").lower() == "high" else (2 if p.get("severity", "").lower() == "medium" else 1)
-        synth_data["permissions"].append({"name": p.get("permission", "Unknown"), "points": pts, "severity": p.get("severity", "low")})
+    # Patterns: 2 each
+    # Keywords: 1 each (max 10)
+    score = 0
+    synth_data = {"permissions": [], "keywords": [], "patterns": []}
+
+    for p in permissions:
+        sev = p.get("severity", "low").lower()
+        pts = 3 if sev == "high" else (2 if sev == "medium" else 1)
+        score += pts
+        synth_data["permissions"].append({
+            "name": p.get("permission", "Unknown"), 
+            "points": pts, 
+            "severity": sev
+        })
     
-    for kw in analysis.get("risky_keywords", []):
-        synth_data["keywords"].append({"name": kw.get("term", "Unknown"), "points": 1, "category": kw.get("category", "General")})
+    for kw in keywords:
+        score += 1
+        synth_data["keywords"].append({
+            "name": kw.get("term", "Unknown"), 
+            "points": 1, 
+            "category": kw.get("category", "General")
+        })
     
-    for pat in analysis.get("sharing_patterns", []):
-        synth_data["patterns"].append({"name": pat, "points": 2})
+    for pat in patterns:
+        score += 2
+        synth_data["patterns"].append({
+            "name": pat, 
+            "points": 2
+        })
+
+    # 3. Determine Level
+    if score >= 10:
+        risk_level = "High"
+    elif score >= 5:
+        risk_level = "Medium"
+    else:
+        risk_level = "Low"
+
+    icon = RISK_ICONS.get(risk_level, "✅")
+    total_pct = _get_percentage(score)
 
     report = {
         "status": "success",
-        "analyzer": "AI Analyzer",
+        "analyzer": "Gemini AI",
+        "app_name": analysis.get("app_name", ""),
         "input_type": input_type,
         "risk_level": risk_level,
         "risk_icon": icon,
-        "risk_score": risk_score,
+        "risk_score": score,
         "risk_percentage": total_pct,
-        "risk_breakdown": _build_breakdown(risk_score, total_pct, synth_data),
+        "risk_breakdown": _build_breakdown(score, total_pct, synth_data),
         "summary": analysis.get("ai_summary", ""),
         "ai_explanation": analysis.get("ai_explanation", ""),
         "permissions_detected": [
@@ -211,9 +241,11 @@ def generate_report_ai(analysis: dict, input_type: str) -> dict:
                 "permission": p.get("permission"),
                 "severity": p.get("severity"),
                 "matched_term": p.get("matched_term"),
-                "reason": p.get("reason", ""),
+                "risk_explanation": p.get("risk_explanation", ""), # Important for UI
+                "purpose": p.get("purpose", ""),                   # Important for UI
+                "recommendation": p.get("recommendation", ""),     # Important for UI
             }
-            for p in analysis.get("permissions_found", [])
+            for p in permissions
         ],
         "risky_keywords_detected": [
             {
@@ -222,18 +254,30 @@ def generate_report_ai(analysis: dict, input_type: str) -> dict:
                 "count": kw.get("count"),
                 "context": kw.get("context"),
             }
-            for kw in analysis.get("risky_keywords", [])
+            for kw in keywords
         ],
-        "data_sharing_patterns_detected": analysis.get("sharing_patterns", []),
+        "data_sharing_patterns_detected": patterns,
         "key_issues": analysis.get("ai_key_issues", []),
-        "recommendations": analysis.get("ai_recommendations", []),
+        "recommendations": analysis.get("ai_recommendations", []) or _build_recommendations_standalone(risk_level, permissions),
         "stats": {
             "words_analyzed": analysis.get("word_count", 0),
             "sentences_analyzed": analysis.get("sentences_analyzed", 0),
-            "permissions_count": len(analysis.get("permissions_found", [])),
-            "risky_keywords_count": len(analysis.get("risky_keywords", [])),
-            "sharing_patterns_count": len(analysis.get("sharing_patterns", [])),
+            "permissions_count": len(permissions),
+            "risky_keywords_count": len(keywords),
+            "sharing_patterns_count": len(patterns),
         },
     }
 
+    # Add OCR text for UI display
+    if input_type == "image":
+        report["ocr_extracted_text_preview"] = analysis.get("ocr_text", "")
+
     return report
+
+
+def _build_recommendations_standalone(level: str, permissions: list) -> list[str]:
+    recs = list(RECOMMENDATIONS.get(level, RECOMMENDATIONS["Low"]))
+    if level == "Medium":
+        perms = [p.get("permission", "Unknown") for p in permissions]
+        recs[1] = recs[1] + (", ".join(perms) if perms else "none specifically flagged")
+    return recs
