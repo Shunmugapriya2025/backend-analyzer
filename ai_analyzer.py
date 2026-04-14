@@ -157,7 +157,7 @@ def analyze_with_gemini(content: str, app_name: str) -> dict:
 def analyze_image_with_gemini(image_path: str, app_name: str) -> dict:
     client = _get_client()
     img = Image.open(image_path)
-    prompt = ANALYSIS_PROMPT.format(content="[IMAGE ATTACHED]", app_name=app_name) + "\nIMPORTANT: Analyze the text visible in this image."
+    prompt = ANALYSIS_PROMPT.format(content="[IMAGE ATTACHED]", app_name=app_name) + "\nIMPORTANT: Also extract every word of text found in this image and include it in a field 'extracted_text_raw' in your JSON response."
     response = client.models.generate_content(model=_MODEL, contents=[prompt, img])
     raw = response.text.strip()
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
@@ -170,8 +170,9 @@ def analyze_image_with_gemini(image_path: str, app_name: str) -> dict:
 
     return {
         "source": "ai_image",
-        "word_count": 0,
-        "sentences_analyzed": 0,
+        "word_count": len(data.get("extracted_text_raw", "").split()),
+        "sentences_analyzed": data.get("extracted_text_raw", "").count("."),
+        "ocr_text": data.get("extracted_text_raw", ""),
         "permissions_found": _normalize_permissions(data.get("permissions_detected", [])),
         "risky_keywords": _normalize_keywords(data.get("risky_keywords_detected", [])),
         "sharing_patterns": data.get("data_sharing_patterns_detected", []),
