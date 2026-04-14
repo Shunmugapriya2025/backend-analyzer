@@ -1,0 +1,6 @@
+{
+  "python.defaultInterpreterPath": "/Users/rakavi/Documents/permission anayzer project/files/.venv/bin/python",
+  "python.analysis.extraPaths": [],
+  "python.terminal.activateEnvironment": true,
+  "python.terminal.useEnvFile": true
+}
