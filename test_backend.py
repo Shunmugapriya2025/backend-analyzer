@@ -4,10 +4,10 @@ Run: pytest tests/ -v
 """
 
 import pytest
-from app.input_handler   import detect_input_type, InputType
-from app.text_pipeline   import run_text_pipeline
-from app.risk_classifier import classify_risk
-from app.report_generator import generate_report
+from input_handler   import detect_input_type, InputType
+from text_pipeline   import run_text_pipeline
+from risk_classifier import classify_risk
+from report_generator import generate_report
 
 
 # ─── Input Handler Tests ───────────────────────────────────────────
@@ -115,7 +115,7 @@ def test_report_risk_level_matches():
 def test_report_image_type_has_ocr_field():
     analysis = {"source": "image", "ocr_text": "test", "permissions_found": [],
                 "risky_keywords": [], "sharing_patterns": [], "word_count": 1, "sentences_analyzed": 1}
-    from app.risk_classifier import RiskResult
+    from risk_classifier import RiskResult
     risk = RiskResult(level="Low", score=0, reasons=[])
     report = generate_report(analysis, risk, "image")
     assert "ocr_extracted_text_preview" in report

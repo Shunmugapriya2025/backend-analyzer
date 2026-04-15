@@ -5,7 +5,7 @@ Cleans policy text, detects permissions & risky keywords using spaCy + regex.
 
 import re
 import spacy
-from app.keyword_config import SENSITIVE_PERMISSIONS, RISKY_KEYWORDS, DATA_SHARING_PATTERNS
+from keyword_config import SENSITIVE_PERMISSIONS, RISKY_KEYWORDS, DATA_SHARING_PATTERNS
 
 # Load spaCy model (small English model)
 try:

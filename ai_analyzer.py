@@ -10,7 +10,8 @@ from typing import Optional, Tuple
 from google import genai
 from PIL import Image
 
-_MODEL = "gemini-2.0-flash-lite"
+_MODEL = "gemini-2.0-flash"
+_MODEL_VISION = "gemini-2.0-flash"
 _client: Optional[genai.Client] = None
 
 def _get_client() -> genai.Client:
@@ -57,53 +58,64 @@ INPUT TEXT:
 """
 
 ANALYSIS_PROMPT = """
-You are a privacy and security expert. Analyze the following app permission text or privacy policy for the app "{app_name}".
+# ROLE: Cybersecurity Risk Analyzer
 
-CONTEXTUAL RISK ASSESSMENT:
-1. Verify if these permissions and terms are consistent with what "{app_name}" actually does in the real world.
-2. If a permission is core to "{app_name}" (e.g., Camera for Instagram Reels), mark it as Low-Medium risk with a clear purpose.
-3. If a permission is unnecessary for "{app_name}" (e.g., Location for a basic Calculator), mark it as High/Critical risk.
-4. If the text looks fake or radically different from the real "{app_name}" policies, flag it in the "ai_explanation".
+# TASK: 
+Analyze the provided app permissions or privacy policy text for the app "{app_name}". 
+Determine the privacy risk level and provide actionable security insights.
 
-TEXT TO ANALYZE:
+# INPUT TEXT:
 \"\"\"
 {content}
 \"\"\"
 
-Return ONLY valid JSON (no markdown, no explanation) with this exact structure:
+# ANALYTICAL RULES (STRICT COMPLIANCE):
+1. DYNAMIC ASSESSMENT: Evaluate the permissions relative to the app's category. Do NOT give generic or repetitive answers.
+2. GRANULAR SCORING: Provide a specific risk score from 0 to 100. Higher permissions/sensitive data access = higher risk.
+3. STRICT IDENTIFICATION: Flag hidden tracking, third-party sharing, and surveillance patterns.
+4. HONESTY: If the text is suspicious or fake, explicitly mention it in the "ai_explanation".
+
+# OUTPUT FORMAT (STRICT JSON ONLY):
 {{
   "risk_level": "Low" | "Medium" | "High",
-  "risk_score": <integer 0-30>,
+  "risk_score": <granular_integer_0_to_100>,
   "summary": "<one-paragraph plain-English summary of findings>",
   "permissions_detected": [
-    {
+    {{
       "permission": "<name>",
       "severity": "low" | "medium" | "high",
       "matched_term": "<exact term found>",
-      "risk_explanation": "<detailed why it's risky e.g. 'Can reveal travel patterns'>",
-      "purpose": "<why app needs this e.g. 'For reels/stories'>",
-      "recommendation": "<actionable advice e.g. 'Allow only while using app'>"
-    }
+      "risk_explanation": "<detailed why it's risky>",
+      "purpose": "<why app needs this>",
+      "recommendation": "<actionable advice>"
+    }}
   ],
   "risky_keywords_detected": [
-    {{"term": "<term>", "category": "<category e.g. Data Collection / Surveillance / Tracking>", "count": <int>, "context": "<short snippet showing usage>"}}
+    {{"term": "<term>", "category": "<category>", "count": <int>, "context": "<short snippet>"}}
   ],
-  "data_sharing_patterns_detected": ["<plain English description of each data sharing pattern found>"],
+  "data_sharing_patterns_detected": ["<description of sharing pattern>"],
   "key_issues": ["<concise bullet issue statements>"],
   "recommendations": ["<actionable recommendation for the user>"],
-  "ai_explanation": "<detailed paragraph explaining the overall risk assessment and reasoning>"
+  "ai_explanation": "<detailed paragraph explaining the overall risk reasoning and dynamic assessment>"
 }}
-
-Scoring guidelines:
-- Each high-severity permission: +3 points
-- Each medium-severity permission: +2 points  
-- Each low-severity permission: +1 point
-- Each risky keyword: +1 point (max +10)
-- Each data sharing pattern: +2 points
-- Score 0-4: Low, 5-9: Medium, 10+: High
-
-Be thorough, accurate, and conservative in risk assessment. Flag anything that could compromise user privacy.
 """
+
+def extract_text_from_image_ai(image_path: str) -> str:
+    """
+    Step 1: Extract all text from an image using Gemini Vision.
+    """
+    client = _get_client()
+    try:
+        img = Image.open(image_path)
+        prompt = "Extract every single word of text found in this image. Do not summarize. Just provide the raw text."
+        
+        response = client.models.generate_content(model=_MODEL_VISION, contents=[prompt, img])
+        text = response.text.strip()
+        return text
+    except Exception as e:
+        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+            raise ValueError("GEMINI_QUOTA_EXHAUSTED")
+        raise e
 
 def classify_content_with_ai(content: str, app_name: str) -> Tuple[str, str]:
     try:
@@ -155,42 +167,30 @@ def analyze_with_gemini(content: str, app_name: str) -> dict:
     }
 
 def analyze_image_with_gemini(image_path: str, app_name: str) -> dict:
-    client = _get_client()
+    """
+    User Request: Separate OCR and AI analysis.
+    Step 1: Extract text.
+    Step 2: Send extracted text to standard AI analysis.
+    """
+    # ── Step 1: Extract ──
     try:
-        img = Image.open(image_path)
-        prompt = ANALYSIS_PROMPT.format(content="[IMAGE ATTACHED]", app_name=app_name) + "\nIMPORTANT: Also extract every word of text found in this image and include it in a field 'extracted_text_raw' in your JSON response."
-        
-        try:
-            response = client.models.generate_content(model=_MODEL, contents=[prompt, img])
-            raw = response.text.strip()
-            raw = re.sub(r"^```(?:json)?\s*", "", raw)
-            raw = re.sub(r"\s*```$", "", raw)
-            data = json.loads(raw)
-        except Exception as e:
-            # If vision fails due to quota, we can't do anything else since we have no text.
-            # We raise a specific error that main.py will catch.
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                raise ValueError("GEMINI_QUOTA_EXHAUSTED")
-            raise e
-
-        return {
-            "source": "ai_image",
-            "word_count": len(data.get("extracted_text_raw", "").split()),
-            "sentences_analyzed": data.get("extracted_text_raw", "").count("."),
-            "ocr_text": data.get("extracted_text_raw", ""),
-            "permissions_found": _normalize_permissions(data.get("permissions_detected", [])),
-            "risky_keywords": _normalize_keywords(data.get("risky_keywords_detected", [])),
-            "sharing_patterns": data.get("data_sharing_patterns_detected", []),
-            "ai_risk_level": data.get("risk_level", "Unknown"),
-            "ai_risk_score": data.get("risk_score", 0),
-            "ai_summary": data.get("summary", ""),
-            "ai_key_issues": data.get("key_issues", []),
-            "ai_recommendations": data.get("recommendations", []),
-            "ai_explanation": data.get("ai_explanation", ""),
-            "detected_type": "Permissions Description" if data.get("risk_score", 0) > 0 else "Terms & Conditions"
-        }
+        ocr_text = extract_text_from_image_ai(image_path)
     except Exception as e:
         raise e
+
+    if not ocr_text.strip():
+        raise ValueError("No text could be extracted from the image by the AI.")
+
+    # ── Step 2: Analyze ──
+    # Re-use the existing text analysis logic for consistency
+    analysis = analyze_with_gemini(ocr_text, app_name)
+    
+    # Enrich with OCR specific metadata
+    analysis["source"] = "ai_image"
+    analysis["ocr_text"] = ocr_text
+    analysis["detected_type"] = "Permissions Description" if analysis.get("ai_risk_score", 0) > 0 else "Terms & Conditions"
+    
+    return analysis
 
 def _normalize_permissions(raw: list) -> list:
     normalized = []

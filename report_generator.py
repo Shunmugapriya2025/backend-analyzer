@@ -174,55 +174,44 @@ def _build_recommendations(risk: RiskResult, analysis: dict) -> list[str]:
 def generate_report_ai(analysis: dict, input_type: str) -> dict:
     """
     Build the final report from AI analyzer output (Gemini).
-    Recalculates score and level programmatically for consistency.
+    Uses the AI's provided score (0-100) and level directly as per User Template.
     """
     # 1. Gather Items
     permissions = analysis.get("permissions_found", [])
     keywords = analysis.get("risky_keywords", [])
     patterns = analysis.get("sharing_patterns", [])
 
-    # 2. Programmatic Scoring (Matches instructions given to AI)
-    # Severity scores: high=3, medium=2, low=1
-    # Patterns: 2 each
-    # Keywords: 1 each (max 10)
-    score = 0
+    # 2. Extract AI Results
+    score = analysis.get("ai_risk_score", 0)
+    risk_level = analysis.get("ai_risk_level", "Low")
+    
+    # Ensure risk_level is capitalized correctly
+    risk_level = risk_level.strip().capitalize()
+    if risk_level not in ["Low", "Medium", "High"]:
+        if score >= 70: risk_level = "High"
+        elif score >= 40: risk_level = "Medium"
+        else: risk_level = "Low"
+
+    # 3. Build Synth Data for Breakdown UI
+    # Since we use the AI score [0-100], we distribute it proportionally for the UI breakdown
     synth_data = {"permissions": [], "keywords": [], "patterns": []}
+    
+    total_weights = (len(permissions) * 3) + (len(keywords) * 1) + (len(patterns) * 2)
+    multiplier = score / total_weights if total_weights > 0 else 0
 
     for p in permissions:
         sev = p.get("severity", "low").lower()
         pts = 3 if sev == "high" else (2 if sev == "medium" else 1)
-        score += pts
-        synth_data["permissions"].append({
-            "name": p.get("permission", "Unknown"), 
-            "points": pts, 
-            "severity": sev
-        })
+        synth_data["permissions"].append({"name": p.get("permission", "Unknown"), "points": pts * multiplier, "severity": sev})
     
     for kw in keywords:
-        score += 1
-        synth_data["keywords"].append({
-            "name": kw.get("term", "Unknown"), 
-            "points": 1, 
-            "category": kw.get("category", "General")
-        })
+        synth_data["keywords"].append({"name": kw.get("term", "Unknown"), "points": 1 * multiplier, "category": kw.get("category", "General")})
     
     for pat in patterns:
-        score += 2
-        synth_data["patterns"].append({
-            "name": pat, 
-            "points": 2
-        })
-
-    # 3. Determine Level
-    if score >= 10:
-        risk_level = "High"
-    elif score >= 5:
-        risk_level = "Medium"
-    else:
-        risk_level = "Low"
+        synth_data["patterns"].append({"name": pat, "points": 2 * multiplier})
 
     icon = RISK_ICONS.get(risk_level, "✅")
-    total_pct = _get_percentage(score)
+    total_pct = score # Direct 0-100 mapping
 
     report = {
         "status": "success",
