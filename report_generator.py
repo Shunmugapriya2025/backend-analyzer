@@ -45,6 +45,11 @@ def generate_report(analysis: dict, risk: RiskResult, input_type: str) -> dict:
         "risk_icon": RISK_ICONS[risk.level],
         "risk_score": risk.score,
         "risk_percentage": total_percentage,
+        "risk_summary": calculate_risk_distribution({
+            "low": sum(1 for p in analysis.get("permissions_found", []) if p["severity"].lower() == "low"),
+            "medium": sum(1 for p in analysis.get("permissions_found", []) if p["severity"].lower() == "medium"),
+            "high": sum(1 for p in analysis.get("permissions_found", []) if p["severity"].lower() == "high"),
+        }),
         "risk_breakdown": _build_breakdown(risk.score, total_percentage, risk.breakdown),
         "summary": _build_summary(risk, analysis),
         "permissions_detected": [
@@ -97,6 +102,49 @@ def _get_percentage(score: int) -> int:
         # Score 10 is 83%, Score 15 is 100%
         pts_above_10 = min(5, score - 10)
         return round(83 + (pts_above_10 / 5) * 17)
+
+
+def calculate_risk_distribution(counts: dict) -> dict:
+    """
+    Normalizes raw risk counts (low, medium, high) into percentages that sum exactly to 100%.
+    Implements specific user logic for handling rounding, overflows, and zero-state.
+    """
+    low_count = counts.get("low", 0)
+    medium_count = counts.get("medium", 0)
+    high_count = counts.get("high", 0)
+
+    total = low_count + medium_count + high_count
+
+    if total == 0:
+        # Default distribution for zero items
+        low, medium, high = 30, 40, 30
+    else:
+        low = round((low_count / total) * 100)
+        medium = round((medium_count / total) * 100)
+        high = round((high_count / total) * 100)
+
+    # Fix rounding overflow/underflow
+    total_percentage = low + medium + high
+    if total_percentage != 100:
+        diff = 100 - total_percentage
+        medium += diff   # adjust medium to fix rounding issue
+
+    # Prevent multiple 100% error (exclusive 100% rule)
+    if low == 100:
+        medium = 0
+        high = 0
+    elif medium == 100:
+        low = 0
+        high = 0
+    elif high == 100:
+        low = 0
+        medium = 0
+
+    return {
+        "low": low,
+        "medium": medium,
+        "high": high
+    }
 
 
 def _build_breakdown(score: int, total_pct: int, data: dict) -> dict:
@@ -222,6 +270,11 @@ def generate_report_ai(analysis: dict, input_type: str) -> dict:
         "risk_icon": icon,
         "risk_score": score,
         "risk_percentage": total_pct,
+        "risk_summary": calculate_risk_distribution({
+            "low": sum(1 for p in permissions if p.get("severity", "low").lower() == "low"),
+            "medium": sum(1 for p in permissions if p.get("severity", "low").lower() == "medium"),
+            "high": sum(1 for p in permissions if p.get("severity", "low").lower() == "high"),
+        }),
         "risk_breakdown": _build_breakdown(score, total_pct, synth_data),
         "summary": analysis.get("ai_summary", ""),
         "ai_explanation": analysis.get("ai_explanation", ""),
