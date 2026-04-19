@@ -8,10 +8,9 @@ import json
 import re
 from typing import Optional, Tuple
 from google import genai
-from PIL import Image
 
-_MODEL = "gemini-2.0-flash"
-_MODEL_VISION = "gemini-2.0-flash"
+_MODEL = "gemini-2.5-flash"
+_MODEL_VISION = "gemini-2.5-flash"
 _client: Optional[genai.Client] = None
 
 def _get_client() -> genai.Client:
@@ -70,59 +69,111 @@ Determine the privacy risk level and provide actionable security insights.
 \"\"\"
 
 # ANALYTICAL RULES (STRICT COMPLIANCE):
-1. DYNAMIC ASSESSMENT: Evaluate the permissions relative to the app's category. Do NOT give generic or repetitive answers.
-2. GRANULAR SCORING: Provide a specific risk score from 0 to 100. Higher permissions/sensitive data access = higher risk.
+1. DYNAMIC ASSESSMENT: Evaluate permissions relative to the app's category. Do NOT give generic answers.
+2. GRANULAR SCORING: Provide a specific risk score from 0 to 100.
 3. STRICT IDENTIFICATION: Flag hidden tracking, third-party sharing, and surveillance patterns.
-4. HONESTY: If the text is suspicious or fake, explicitly mention it in the "ai_explanation".
+4. BREVITY: Keep all text fields SHORT and SCANNABLE. No long paragraphs.
 
 # OUTPUT FORMAT (STRICT JSON ONLY):
 {{
   "risk_level": "Low" | "Medium" | "High",
-  "risk_score": <granular_integer_0_to_100>,
-  "summary": "<one-paragraph plain-English summary of findings>",
+  "risk_score": <integer 0-100>,
+  "summary": "<2 sentences max: what data is collected and the overall risk verdict>",
   "permissions_detected": [
     {{
       "permission": "<name>",
       "severity": "low" | "medium" | "high",
       "matched_term": "<exact term found>",
-      "risk_explanation": "<detailed why it's risky>",
-      "purpose": "<why app needs this>",
-      "recommendation": "<actionable advice>"
+      "risk_explanation": "<1 sentence: why it's risky>",
+      "purpose": "<1 sentence: why app needs this>",
+      "recommendation": "<1 sentence: what user should do>"
     }}
   ],
   "risky_keywords_detected": [
     {{"term": "<term>", "category": "<category>", "count": <int>, "context": "<short snippet>"}}
   ],
-  "data_sharing_patterns_detected": ["<description of sharing pattern>"],
-  "key_issues": ["<concise bullet issue statements>"],
-  "recommendations": ["<actionable recommendation for the user>"],
-  "ai_explanation": "<detailed paragraph explaining the overall risk reasoning and dynamic assessment>"
+  "data_sharing_patterns_detected": ["<1-line description of sharing pattern>"],
+  "key_issues": ["<concise bullet issue>"],
+  "recommendations": ["<max 4 items, each 1 short sentence, specific and actionable>"],
+  "ai_explanation": "<3 sentences max: plain-language summary of the key risks and why the score is what it is. No jargon, no repetition.>"
 }}
 """
 
 def extract_text_from_image_ai(image_path: str) -> str:
     """
-    Step 1: Extract all text from an image using Gemini Vision.
+    Step 1 — Extract all text from an image using Gemini Vision (OCR).
+
+    Uses raw bytes + MIME type (required by google-genai SDK).
+    Does NOT pass a PIL object — that causes response.text = None.
     """
+    import mimetypes
+    from google.genai import types as genai_types
+
     client = _get_client()
+
+    # ── Determine MIME type ──────────────────────────────────────────
+    mime_type, _ = mimetypes.guess_type(image_path)
+    if not mime_type or not mime_type.startswith("image/"):
+        mime_type = "image/png"  # safe fallback
+
+    # ── Read image bytes ─────────────────────────────────────────────
     try:
-        img = Image.open(image_path)
-        prompt = "Extract every single word of text found in this image. Do not summarize. Just provide the raw text."
-        
-        response = client.models.generate_content(model=_MODEL_VISION, contents=[prompt, img])
-        text = response.text.strip()
-        return text
+        with open(image_path, "rb") as f:
+            image_bytes = f.read()
+    except OSError as e:
+        raise ValueError(f"Cannot read image file: {e}")
+
+    if not image_bytes:
+        raise ValueError("Image file is empty.")
+
+    # ── Build parts using correct SDK format ─────────────────────────
+    prompt_part = genai_types.Part.from_text(
+        text=(
+            "Extract every single word of text visible in this image. "
+            "Output ONLY the raw extracted text exactly as it appears. "
+            "Do NOT summarize, describe, or add any commentary."
+        )
+    )
+    image_part = genai_types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
+
+    try:
+        response = client.models.generate_content(
+            model=_MODEL_VISION,
+            contents=[genai_types.Content(
+                role="user",
+                parts=[prompt_part, image_part]
+            )]
+        )
     except Exception as e:
         if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-            raise ValueError("GEMINI_QUOTA_EXHAUSTED")
-        raise e
+            raise ValueError("Gemini API quota exhausted. Please try again later.")
+        raise ValueError(f"Gemini Vision API error: {e}")
+
+    # ── Safe response parsing ────────────────────────────────────────
+    if response is None:
+        raise ValueError("Text extraction failed. Gemini returned no response.")
+
+    raw_text = getattr(response, "text", None)
+    if raw_text is None:
+        raise ValueError("Text extraction failed. Please upload a clearer image.")
+
+    cleaned = _clean_extracted_text(raw_text)
+    if not cleaned:
+        raise ValueError("No readable text found in the image. Please upload a clearer screenshot.")
+
+    return cleaned
 
 def classify_content_with_ai(content: str, app_name: str) -> Tuple[str, str]:
     try:
         client = _get_client()
         prompt = CLASSIFICATION_PROMPT.format(content=content[:5000], app_name=app_name)
         response = client.models.generate_content(model=_MODEL, contents=prompt)
-        result = response.text.upper()
+        
+        raw_text = getattr(response, "text", None)
+        if not raw_text:
+            return "VALID_APP", "TERMS" # safe default
+            
+        result = raw_text.upper()
         
         # Default fallbacks
         app_status = "VALID_APP"
@@ -136,20 +187,27 @@ def classify_content_with_ai(content: str, app_name: str) -> Tuple[str, str]:
 
         return app_status, content_status
     except Exception as e:
-        raise e
+        # If classification fails, we return a default to allow analysis to attempt
+        print(f"Classification AI error: {e}")
+        return "VALID_APP", "TERMS"
 
 def analyze_with_gemini(content: str, app_name: str) -> dict:
     client = _get_client()
     prompt = ANALYSIS_PROMPT.format(content=content[:8000], app_name=app_name)
     response = client.models.generate_content(model=_MODEL, contents=prompt)
-    raw = response.text.strip()
+    
+    raw_response = getattr(response, "text", None)
+    if not raw_response:
+        raise ValueError("AI analysis failed: Gemini returned an empty response. Wait a moment and try again.")
+        
+    raw = raw_response.strip()
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
     raw = re.sub(r"\s*```$", "", raw)
 
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
-        raise ValueError(f"Gemini returned invalid JSON: {e}")
+        raise ValueError(f"Gemini returned invalid JSON output. (Internal Error)")
 
     return {
         "source": "ai",
@@ -215,3 +273,19 @@ def _normalize_keywords(raw: list) -> list:
             "context": kw.get("context", ""),
         })
     return normalized
+
+
+def _clean_extracted_text(text: str) -> str:
+    """
+    Clean OCR-extracted text before analysis:
+    - Strip leading/trailing whitespace
+    - Collapse multiple spaces/tabs into one
+    - Collapse 3+ newlines into 2 (preserve paragraphs)
+    - Remove non-printable/control characters
+    """
+    if not text:
+        return ""
+    text = re.sub(r'[^\S\n]+', ' ', text)      # collapse horizontal whitespace
+    text = re.sub(r'\n{3,}', '\n\n', text)     # max 2 consecutive newlines
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)  # remove control chars
+    return text.strip()

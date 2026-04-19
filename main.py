@@ -4,10 +4,10 @@ Run: uvicorn main:app --reload
 Docs: http://127.0.0.1:8000/docs
 """
 
-from fastapi import FastAPI, Form, HTTPException
+from fastapi import FastAPI, Form, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional
-import os
+import os, tempfile, shutil
 from datetime import datetime, timezone
 
 # Load .env automatically
@@ -54,22 +54,71 @@ def root():
 async def analyze(
     app_name: Optional[str] = Form(None, description="Name of the app being analyzed"),
     text: Optional[str] = Form(None, description="Paste privacy policy text here"),
+    file: Optional[UploadFile] = File(None, description="Screenshot image of a permission policy"),
 ):
     """
-    Accepts privacy policy text and analyzes it for privacy risks.
+    Accepts privacy policy text OR a screenshot image and analyzes it for privacy risks.
+    For images: Gemini Vision extracts text first, then the extracted text is analyzed.
     """
     if not app_name or not app_name.strip():
         raise HTTPException(status_code=400, detail="App Name is required.")
-    
-    if not text or not text.strip():
+
+    ocr_preview = None
+    content = None
+
+    # ──────────────────────────────────────────────────────────────────
+    # STEP 1 → IMAGE: Extract text via Gemini Vision OCR
+    # ──────────────────────────────────────────────────────────────────
+    if file and file.filename:
+        suffix = os.path.splitext(file.filename)[1] or ".png"
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                shutil.copyfileobj(file.file, tmp)
+                tmp_path = tmp.name
+            from ai_analyzer import extract_text_from_image_ai
+            extracted = extract_text_from_image_ai(tmp_path)   # raises on failure
+        except Exception as e:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Image text extraction failed: {str(e)}"
+            )
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+        # Guard: OCR returned empty
+        if not extracted or not extracted.strip():
+            raise HTTPException(
+                status_code=422,
+                detail="Text extraction failed. Please upload a clear, readable screenshot."
+            )
+
+        content = extracted.strip()
+        ocr_preview = content[:600]
+        input_type = InputType.IMAGE
+
+    # ──────────────────────────────────────────────────────────────────
+    # STEP 1 → TEXT: Use pasted text directly
+    # ──────────────────────────────────────────────────────────────────
+    elif text and text.strip():
+        content = text.strip()
+        input_type = InputType.TEXT
+    else:
         raise HTTPException(
             status_code=400,
-            detail="Provide privacy policy text for analysis."
+            detail="Provide either privacy policy text or a screenshot image."
         )
 
-    input_type = InputType.TEXT
-    content = text
-    ocr_preview = None
+    # ──────────────────────────────────────────────────────────────────
+    # STEP 2 → PRE-GEMINI VALIDATION: Final guard before sending
+    # ──────────────────────────────────────────────────────────────────
+    if not content or len(content.strip()) < 10:
+        raise HTTPException(
+            status_code=422,
+            detail="No valid text found to analyze. Please provide more content."
+        )
+
 
     # ── Step 2: Content Classification (Hybrid AI + Heuristic Fallback) ─────
     try:
@@ -120,6 +169,9 @@ async def analyze(
 
     if app_name and app_name.strip():
         report["app_name"] = app_name.strip()
+
+    if ocr_preview:
+        report["ocr_extracted_text_preview"] = ocr_preview
 
     report["analyzed_at"] = datetime.now(timezone.utc).isoformat()
     return report
